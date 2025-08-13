@@ -1,0 +1,9 @@
+// Made by 0x1000007e
+
+mod Math;
+
+pub fn add(a: number, b: number) -> number {
+  return a + b;
+}
+
+

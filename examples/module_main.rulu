@@ -1,0 +1,16 @@
+// Made by 0x1000007e
+
+// Show simple module system: public API via pub fn in a module
+
+mod Math;
+
+use crate::Math as Math;
+
+fn main() {
+  let a = 7;
+  let b = 5;
+  let s = Math.add(a, b);
+  print(s);
+}
+
+

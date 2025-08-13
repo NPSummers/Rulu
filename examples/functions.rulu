@@ -1,0 +1,28 @@
+// Made by 0x1000007e
+
+// Function definitions and calls in rulu (Rust-like syntax)
+
+fn add(a: number, b: number) -> number {
+  return a + b;
+}
+
+fn greet(name: string) {
+  print("Hello, " .. name);
+}
+
+// public function (currently behaves same as non-pub in emitter)
+pub fn square(x: number) -> number {
+  return x * x;
+}
+
+fn main() {
+  let x = add(2, 3);
+  print(x);
+
+  greet("world");
+
+  let y = square(6);
+  print(y);
+}
+
+
