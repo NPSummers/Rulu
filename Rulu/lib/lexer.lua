@@ -41,6 +41,7 @@ local KEYWORDS = {
   ["as"] = true,
   ["true"] = true,
   ["false"] = true,
+  ["step"] = true,
 }
 
 local function is_alpha(c)
@@ -192,6 +193,10 @@ local TWO_CHAR_OPS = {
   ["=>"] = true,
 }
 
+local THREE_CHAR_OPS = {
+  ["..="] = true,
+}
+
 local SINGLE_CHAR = {
   ["("] = "LPAREN", [")"] = "RPAREN",
   ["{"] = "LBRACE", ["}"] = "RBRACE",
@@ -209,7 +214,14 @@ function Lexer:read_operator_or_symbol()
   local start_line, start_col = self.line, self.col
   local c1 = self:peek(0)
   local c2 = self:peek(1)
+  local c3 = self:peek(2)
   local pair = c1 .. c2
+  local tri = pair .. c3
+  if THREE_CHAR_OPS[tri] then
+    self:add("OP", tri, start_line, start_col)
+    self:advance(3)
+    return
+  end
   if TWO_CHAR_OPS[pair] then
     self:add("OP", pair, start_line, start_col)
     self:advance(2)

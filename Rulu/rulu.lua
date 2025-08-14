@@ -2,6 +2,9 @@
 
 -- rulu CLI: transpile Rust-like "rulu" to Lua
 
+local VERSION = "0.1.0"
+local BUNDLED = _G.__RULU_BUNDLED or false
+
 local function read_file(path)
   local f, err = io.open(path, "rb")
   if not f then return nil, err end
@@ -19,7 +22,7 @@ local function write_file(path, content)
 end
 
 local function parse_args(argv)
-  local args = { input = nil, out = nil, run = false, print = false }
+  local args = { input = nil, out = nil, run = false, print = false, version = false }
   local i = 1
   while i <= #argv do
     local a = argv[i]
@@ -30,6 +33,8 @@ local function parse_args(argv)
       args.run = true
     elseif a == "--print" or a == "-p" then
       args.print = true
+    elseif a == "--version" or a == "-v" then
+      args.version = true
     elseif a == "--help" or a == "-h" then
       args.help = true
     else
@@ -41,15 +46,18 @@ local function parse_args(argv)
 end
 
 local function usage()
-  print([[rulu - Rust-like language that transpiles to Lua
+  local extra = BUNDLED and "Usage (bundled exe):\n  rulu.exe <input.rulu>\n  rulu.exe --version\n" or "Usage:\n  lua Rulu/rulu.lua <input.rulu> [--out out.lua] [--run] [--print]\n  lua Rulu/rulu.lua --help\n"
+  print(([[rulu - Rust-like language that transpiles to Lua
 Usage:
-  lua Rulu/rulu.lua <input.rulu> [--out out.lua] [--run] [--print]
-  lua Rulu/rulu.lua --help
-]])
+%s]]):format(extra))
 end
 
 local function main()
   local args = parse_args(arg)
+  if args.version then
+    print("rulu " .. VERSION)
+    return 0
+  end
   if args.help or (not args.input and not args.print) then
     usage()
     return 0
@@ -57,7 +65,15 @@ local function main()
 
   local Lexer = require("Rulu.lib.lexer")
   local Parser = require("Rulu.lib.parser")
+  local Checker = require("Rulu.lib.checker")
   local Emitter = require("Rulu.lib.emitter")
+
+  if BUNDLED then
+    if args.out or args.print or args.run then
+      io.stderr:write("In bundled mode, --out/--print/--run are not supported. Just pass an input file.\n")
+      return 1
+    end
+  end
 
   local source
   if args.input then
@@ -93,10 +109,18 @@ local function main()
 
   local ast = ast_or_err
 
+  local okc, errc = pcall(function()
+    return Checker.check(ast)
+  end)
+  if not okc then
+    io.stderr:write("Check error: " .. tostring(errc) .. "\n")
+    return 1
+  end
+
   local emitter = Emitter.new()
   local lua_code = emitter:emit_program(ast)
 
-  if args.out then
+  if not BUNDLED and args.out then
     local okw, errw = write_file(args.out, lua_code)
     if not okw then
       io.stderr:write("Write error: " .. tostring(errw) .. "\n")
@@ -105,11 +129,11 @@ local function main()
     print("Wrote " .. args.out)
   end
 
-  if args.print or not args.out then
+  if not BUNDLED and (args.print or not args.out) then
     io.write(lua_code)
   end
 
-  if args.run then
+  if (not BUNDLED and args.run) or (BUNDLED and args.input) then
     local loader = loadstring or load
     local chunk, errc = loader(lua_code, args.out or args.input or "rulu_chunk")
     if not chunk then

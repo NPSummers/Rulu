@@ -74,8 +74,12 @@ function Parser:parse_top_level()
     return self:parse_use()
   elseif self:is("KW", "const") or self:is("KW", "static") then
     return self:parse_const_like()
-  elseif self:is("KW", "pub") and self:peek(1) and self:peek(1).type == "KW" and self:peek(1).value == "fn" then
-    return self:parse_function()
+  elseif self:is("KW", "pub") then
+    if self:peek(1) and self:peek(1).type == "KW" and self:peek(1).value == "fn" then
+      return self:parse_function()
+    elseif self:peek(1) and self:peek(1).type == "KW" and (self:peek(1).value == "const" or self:peek(1).value == "static") then
+      return self:parse_const_like()
+    end
   elseif self:is("KW", "fn") then
     return self:parse_function()
   elseif self:is("KW", "let") then
@@ -203,20 +207,28 @@ function Parser:parse_for()
   local iter = self:expect("IDENT", nil, "Iterator variable name expected").value
   self:expect("KW", "in")
   local range_expr = self:parse_expression()
-  local start_expr, end_expr
-  if self:match("OP", "..") then
+  local start_expr, end_expr, inclusive, step_expr
+  if self:is("OP", "..") or self:is("OP", "..=") then
+    local op = self:current().value; self.pos = self.pos + 1
+    inclusive = (op == "..=")
     start_expr = range_expr
     end_expr = self:parse_expression()
+    if self:match("KW", "step") then
+      step_expr = self:parse_expression()
+    end
   elseif range_expr.kind == "Binary" and range_expr.operator == ".." then
     start_expr = range_expr.left
     end_expr = range_expr.right
+    if self:match("KW", "step") then
+      step_expr = self:parse_expression()
+    end
   else
     -- for v in expr { ... }
     local body = self:parse_block()
     return node("ForEach", { var = iter, iterExpr = range_expr, body = body })
   end
   local body = self:parse_block()
-  return node("ForRange", { var = iter, startExpr = start_expr, endExpr = end_expr, body = body })
+  return node("ForRange", { var = iter, startExpr = start_expr, endExpr = end_expr, inclusive = inclusive, stepExpr = step_expr, body = body })
 end
 
 function Parser:parse_let()
@@ -306,9 +318,18 @@ function Parser:parse_use()
 end
 
 function Parser:parse_const_like()
-  -- const/ static NAME = expr;
-  local kind = self:current().value
-  self.pos = self.pos + 1
+  -- [pub] const/ static NAME = expr;
+  local is_public = false
+  if self:match("KW", "pub") then
+    is_public = true
+  end
+  local kind
+  if self:is("KW", "const") or self:is("KW", "static") then
+    kind = self:current().value
+    self.pos = self.pos + 1
+  else
+    error("const/static expected")
+  end
   local name = self:expect("IDENT", nil, "Name expected").value
   if self:match("COLON") then
     if self:is("IDENT") or self:is("KW") then self.pos = self.pos + 1 end
@@ -316,7 +337,7 @@ function Parser:parse_const_like()
   self:expect("OP", "=")
   local value = self:parse_expression()
   self:expect("SEMI")
-  return node("Const", { storage = kind, name = name, value = value })
+  return node("Const", { storage = kind, name = name, value = value, isPublic = is_public })
 end
 
 -- Expressions (Pratt parser)

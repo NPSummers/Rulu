@@ -2,6 +2,8 @@
 
 mod Math;
 
+pub const TEN = 10;
+
 pub fn add(a: number, b: number) -> number {
   return a + b;
 }

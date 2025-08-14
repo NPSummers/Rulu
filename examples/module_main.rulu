@@ -11,6 +11,7 @@ fn main() {
   let b = 5;
   let s = Math.add(a, b);
   print(s);
+  print(Math.TEN);
 }
 
 
