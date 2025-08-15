@@ -1,0 +1,129 @@
+name: Build Rulu Installer
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+
+    steps:
+      # Checkout the repository code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Create directory structure
+      - name: Create directory structure
+        run: |
+          mkdir app
+          mkdir assets
+        shell: cmd
+
+      # Download the latest rulu.exe from GitHub Releases
+      - name: Download rulu.exe
+        run: |
+          curl -L -o app/rulu.exe https://github.com/NPSummers/Rulu/releases/download/ver-0.1.0-patch-1/rulu.exe
+        shell: cmd
+
+      # Install NSIS
+      - name: Install NSIS
+        run: |
+          choco install nsis -y
+        shell: cmd
+
+      # Create NSIS script
+      - name: Create NSIS installer script
+        run: |
+          echo !include "MUI2.nsh" > setup.nsi
+          echo !define NAME "Rulu" >> setup.nsi
+          echo !define APPFILE "rulu.exe" >> setup.nsi
+          echo !define VERSION "0.1.0-patch-1" >> setup.nsi
+          echo !define SLUG "${NAME} v${VERSION}" >> setup.nsi
+          echo Name "${NAME}" >> setup.nsi
+          echo OutFile "Rulu_Setup.exe" >> setup.nsi
+          echo InstallDir "$PROGRAMFILES\${NAME}" >> setup.nsi
+          echo InstallDirRegKey HKCU "Software\${NAME}" "" >> setup.nsi
+          echo RequestExecutionLevel admin >> setup.nsi
+          echo !define MUI_ABORTWARNING >> setup.nsi
+          echo !define MUI_WELCOMEPAGE_TITLE "${SLUG} Setup" >> setup.nsi
+          echo !insertmacro MUI_PAGE_WELCOME >> setup.nsi
+          echo !insertmacro MUI_PAGE_DIRECTORY >> setup.nsi
+          echo !insertmacro MUI_PAGE_INSTFILES >> setup.nsi
+          echo !insertmacro MUI_PAGE_FINISH >> setup.nsi
+          echo !insertmacro MUI_UNPAGE_CONFIRM >> setup.nsi
+          echo !insertmacro MUI_UNPAGE_INSTFILES >> setup.nsi
+          echo !insertmacro MUI_LANGUAGE "English" >> setup.nsi
+          echo Section "Install Rulu" SEC_RULU >> setup.nsi
+          echo   SectionIn RO >> setup.nsi
+          echo   SetOutPath "$INSTDIR" >> setup.nsi
+          echo   File "app\${APPFILE}" >> setup.nsi
+          echo   WriteRegStr HKCU "Software\${NAME}" "" "$INSTDIR" >> setup.nsi
+          echo   WriteUninstaller "$INSTDIR\Uninstall.exe" >> setup.nsi
+          echo   ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" >> setup.nsi
+          echo   StrCpy $1 "$INSTDIR" >> setup.nsi
+          echo   ${If} $0 !<> "" >> setup.nsi
+          echo     StrCpy $0 "$0;$1" >> setup.nsi
+          echo   ${Else} >> setup.nsi
+          echo     StrCpy $0 "$1" >> setup.nsi
+          echo   ${EndIf} >> setup.nsi
+          echo   WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0" >> setup.nsi
+          echo   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000 >> setup.nsi
+          echo SectionEnd >> setup.nsi
+          echo Section "Uninstall" >> setup.nsi
+          echo   Delete "$INSTDIR\${APPFILE}" >> setup.nsi
+          echo   Delete "$INSTDIR\Uninstall.exe" >> setup.nsi
+          echo   RMDir "$INSTDIR" >> setup.nsi
+          echo   DeleteRegKey /ifempty HKCU "Software\${NAME}" >> setup.nsi
+          echo   ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" >> setup.nsi
+          echo   Push "$INSTDIR" >> setup.nsi
+          echo   Push "$0" >> setup.nsi
+          echo   Call un.RemoveFromPath >> setup.nsi
+          echo   SendMessage ${HWND_BROADCAST} ${WM_WININICHANGE} 0 "STR:Environment" /TIMEOUT=5000 >> setup.nsi
+          echo SectionEnd >> setup.nsi
+          echo Function un.RemoveFromPath >> setup.nsi
+          echo   Exch $0 >> setup.nsi
+          echo   Exch >> setup.nsi
+          echo   Exch $1 >> setup.nsi
+          echo   Push $2 >> setup.nsi
+          echo   Push $3 >> setup.nsi
+          echo   Push $4 >> setup.nsi
+          echo   StrLen $2 "$1" >> setup.nsi
+          echo   StrCpy $3 0 >> setup.nsi
+          echo   loop: >> setup.nsi
+          echo     StrCpy $4 "$0" $2 $3 >> setup.nsi
+          echo     ${If} $4 == "$1" >> setup.nsi
+          echo       StrCpy $4 "$0" $3 >> setup.nsi
+          echo       IntOp $3 $3 + $2 >> setup.nsi
+          echo       StrCpy $0 "$4$0" -1 $3 >> setup.nsi
+          echo       Goto done >> setup.nsi
+          echo     ${EndIf} >> setup.nsi
+          echo     IntOp $3 $3 + 1 >> setup.nsi
+          echo     StrCpy $4 "$0" 1 $3 >> setup.nsi
+          echo     ${If} $4 == "" >> setup.nsi
+          echo       Goto done >> setup.nsi
+          echo     ${EndIf} >> setup.nsi
+          echo     Goto loop >> setup.nsi
+          echo   done: >> setup.nsi
+          echo     WriteRegStr HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" "$0" >> setup.nsi
+          echo   Pop $4 >> setup.nsi
+          echo   Pop $3 >> setup.nsi
+          echo   Pop $2 >> setup.nsi
+          echo   Pop $1 >> setup.nsi
+          echo   Pop $0 >> setup.nsi
+          echo FunctionEnd >> setup.nsi
+        shell: cmd
+
+      # Compile NSIS script
+      - name: Compile NSIS installer
+        run: |
+          makensis setup.nsi
+        shell: cmd
+
+      # Upload the installer as an artifact
+      - name: Upload Rulu installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rulu_Setup
+          path: Rulu_Setup.exe
