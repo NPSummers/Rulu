@@ -37,6 +37,7 @@ jobs:
       - name: Create NSIS installer script
         run: |
           echo !include "MUI2.nsh" > setup.nsi
+          echo !include "LogicLib.nsh" >> setup.nsi
           echo !define NAME "Rulu" >> setup.nsi
           echo !define APPFILE "rulu.exe" >> setup.nsi
           echo !define VERSION "0.1.0-patch-1" >> setup.nsi
@@ -63,7 +64,7 @@ jobs:
           echo   WriteUninstaller "$INSTDIR\Uninstall.exe" >> setup.nsi
           echo   ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path" >> setup.nsi
           echo   StrCpy $1 "$INSTDIR" >> setup.nsi
-          echo   ${If} $0 !<> "" >> setup.nsi
+          echo   ${If} $0 ^!<> "" >> setup.nsi
           echo     StrCpy $0 "$0;$1" >> setup.nsi
           echo   ${Else} >> setup.nsi
           echo     StrCpy $0 "$1" >> setup.nsi
