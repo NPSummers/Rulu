@@ -10,21 +10,21 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # Checkout the repository code (includes setup.nsi)
+      # Checkout the repository code (includes installer/setup.nsi)
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # Create directory structure
       - name: Create directory structure
         run: |
-          mkdir app
-          mkdir assets
+          mkdir installer\app
+          mkdir installer\assets
         shell: cmd
 
       # Download the latest rulu.exe from GitHub Releases
       - name: Download rulu.exe
         run: |
-          curl -L -o app/rulu.exe https://github.com/NPSummers/Rulu/releases/download/ver-0.1.0-patch-1/rulu.exe
+          curl -L -o installer\app\rulu.exe https://github.com/NPSummers/Rulu/releases/download/ver-0.1.0-patch-1/rulu.exe
         shell: cmd
 
       # Install NSIS
@@ -36,7 +36,8 @@ jobs:
       # Compile NSIS script
       - name: Compile NSIS installer
         run: |
-          makensis installer/setup.nsi
+          cd installer
+          makensis setup.nsi
         shell: cmd
 
       # Upload the installer as an artifact
@@ -44,11 +45,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Rulu_Setup
-          path: Rulu_Setup.exe
+          path: installer\Rulu_Setup.exe
 
       # Upload setup.nsi for debugging (optional)
       - name: Upload setup.nsi for debugging
         uses: actions/upload-artifact@v4
         with:
           name: setup-nsi
-          path: setup.nsi
+          path: installer\setup.nsi
