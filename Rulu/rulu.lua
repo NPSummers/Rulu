@@ -68,6 +68,61 @@ local function main()
   local Checker = require("Rulu.lib.checker")
   local Emitter = require("Rulu.lib.emitter")
 
+  local function dirname(path)
+    if not path then return "." end
+    local dir = path:gsub("\\", "/")
+    local idx = dir:match("^.*()/")
+    if idx then
+      return dir:sub(1, idx - 1)
+    else
+      return "."
+    end
+  end
+
+  local function install_rulu_searcher(base_dir)
+    local searchers = package.searchers or package.loaders
+    local function searcher(modname)
+      local rel = (modname or ""):gsub("%.", "/")
+      local candidates = {
+        base_dir .. "/" .. rel .. ".lua",
+        base_dir .. "/" .. rel .. ".rulu",
+        rel .. ".lua",
+        rel .. ".rulu",
+      }
+      for _, p in ipairs(candidates) do
+        local f = io.open(p, "rb")
+        if f then
+          local content = f:read("*a"); f:close()
+          if p:sub(-5) == ".rulu" then
+            local ok_lex, tokens_or_err = pcall(function()
+              local lx = Lexer.new(content)
+              return lx:tokenize()
+            end)
+            if not ok_lex then return nil, tokens_or_err end
+            local ok_par, ast_or_err = pcall(function()
+              local ps = Parser.new(tokens_or_err)
+              return ps:parse_program()
+            end)
+            if not ok_par then return nil, ast_or_err end
+            local ok_chk, chk_err = pcall(function() return Checker.check(ast_or_err) end)
+            if not ok_chk then return nil, chk_err end
+            local em = Emitter.new()
+            local lua_code = em:emit_program(ast_or_err)
+            local loader = (loadstring or load)(lua_code, p)
+            if not loader then return nil, "Failed to load generated Lua from " .. p end
+            return loader, p
+          else
+            local loader = (loadstring or load)(content, p)
+            if not loader then return nil, "Failed to load Lua file " .. p end
+            return loader, p
+          end
+        end
+      end
+      return nil, "rulu searcher: module not found '" .. tostring(modname) .. "'"
+    end
+    table.insert(searchers, 1, searcher)
+  end
+
   if BUNDLED then
     if args.out or args.print or args.run then
       io.stderr:write("In bundled mode, --out/--print/--run are not supported. Just pass an input file.\n")
@@ -129,11 +184,12 @@ local function main()
     print("Wrote " .. args.out)
   end
 
-  if not BUNDLED and (args.print or not args.out) then
+  if not BUNDLED and args.print then
     io.write(lua_code)
   end
 
   if (not BUNDLED and args.run) or (BUNDLED and args.input) then
+    install_rulu_searcher(dirname(args.input))
     local loader = loadstring or load
     local chunk, errc = loader(lua_code, args.out or args.input or "rulu_chunk")
     if not chunk then

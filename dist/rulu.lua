@@ -328,8 +328,17 @@ function Parser:parse_program()
     local stmt = self:parse_top_level()
     if stmt then table.insert(body, stmt) end
   end
-  -- Allow a leading module decl: mod Name;
-  if body[1] and body[1].kind == "ModuleDecl" then
+  -- Determine if this file is a module or an executable program.
+  -- If there's a top-level `fn main()`, treat as program and keep any `mod` decls as dependency decls.
+  -- Otherwise, if the first statement is a ModuleDecl, treat that as the module name and remove it from body.
+  local hasMain = false
+  for _, s in ipairs(body) do
+    if s.kind == "Function" and s.name == "main" then
+      hasMain = true
+      break
+    end
+  end
+  if not hasMain and body[1] and body[1].kind == "ModuleDecl" then
     moduleName = body[1].name
     table.remove(body, 1)
   end
@@ -337,18 +346,30 @@ function Parser:parse_program()
 end
 
 function Parser:parse_top_level()
-  if self:is("KW", "mod") then
-    return self:parse_module_decl()
+  if self:is("KW", "pub") then
+    -- Handle pub before fn/const/static/mod/use
+    self:match("KW", "pub")
+    if self:is("KW", "fn") then
+      local fn = self:parse_function()
+      fn.isPublic = true
+      return fn
+    elseif self:is("KW", "const") or self:is("KW", "static") then
+      local c = self:parse_const_like()
+      c.isPublic = true
+      return c
+    elseif self:is("KW", "mod") then
+      return self:parse_module(true)
+    elseif self:is("KW", "use") then
+      return self:parse_use(true)
+    else
+      error("Unexpected token after 'pub'")
+    end
+  elseif self:is("KW", "mod") then
+    return self:parse_module(false)
   elseif self:is("KW", "use") then
-    return self:parse_use()
+    return self:parse_use(false)
   elseif self:is("KW", "const") or self:is("KW", "static") then
     return self:parse_const_like()
-  elseif self:is("KW", "pub") then
-    if self:peek(1) and self:peek(1).type == "KW" and self:peek(1).value == "fn" then
-      return self:parse_function()
-    elseif self:peek(1) and self:peek(1).type == "KW" and (self:peek(1).value == "const" or self:peek(1).value == "static") then
-      return self:parse_const_like()
-    end
   elseif self:is("KW", "fn") then
     return self:parse_function()
   elseif self:is("KW", "let") then
@@ -367,6 +388,23 @@ function Parser:parse_module_decl()
   local name = self:expect("IDENT", nil, "Module name expected").value
   self:expect("SEMI", nil, "';' expected after module decl")
   return node("ModuleDecl", { name = name })
+end
+
+function Parser:parse_module(is_public)
+  self:expect("KW", "mod")
+  local name_tok = self:expect("IDENT", nil, "Module name expected")
+  if self:is("SEMI") then
+    self:match("SEMI")
+    return node("ModuleDecl", { name = name_tok.value, isPublic = is_public or false })
+  end
+  self:expect("LBRACE")
+  local items = {}
+  while not self:is("RBRACE") do
+    local item = self:parse_top_level()
+    if item then table.insert(items, item) end
+  end
+  self:expect("RBRACE")
+  return node("Module", { name = name_tok.value, isPublic = is_public or false, body = items })
 end
 
 function Parser:parse_function()
@@ -558,7 +596,7 @@ function Parser:parse_loop()
   return node("Loop", { body = body })
 end
 
-function Parser:parse_use()
+function Parser:parse_use(is_public)
   -- use path::to::name as alias;
   self:expect("KW", "use")
   local parts = {}
@@ -572,18 +610,33 @@ function Parser:parse_use()
   local first = accept_part()
   if not first then error("Expected path after 'use'") end
   table.insert(parts, first)
+  local items = nil
   while self:is("OP", "::") do
     self.pos = self.pos + 1
-    local p = accept_part()
-    if not p then error("Expected identifier after '::'") end
-    table.insert(parts, p)
+    if self:is("LBRACE") then
+      -- group import: ::{a, b}
+      self:expect("LBRACE")
+      items = {}
+      if not self:is("RBRACE") then
+        repeat
+          local name = self:expect("IDENT", nil, "Name in grouped use expected").value
+          table.insert(items, name)
+        until not self:match("COMMA")
+      end
+      self:expect("RBRACE")
+      break
+    else
+      local p = accept_part()
+      if not p then error("Expected identifier after '::'") end
+      table.insert(parts, p)
+    end
   end
   local alias = nil
   if self:match("KW", "as") then
     alias = self:expect("IDENT", nil, "Alias name expected").value
   end
   self:expect("SEMI", nil, "';' expected after use statement")
-  return node("Use", { parts = parts, alias = alias })
+  return node("Use", { parts = parts, alias = alias, items = items, isPublic = is_public or false })
 end
 
 function Parser:parse_const_like()
@@ -671,6 +724,14 @@ function Parser:parse_call()
       self:expect("OP", ".")
       local prop = self:expect("IDENT", nil, "Property name expected").value
       expr = node("Member", { object = expr, property = prop })
+    elseif self:is("OP", "::") then
+      -- Module path access: Mod::name -> PathAccess(Mod, name)
+      self:expect("OP", "::")
+      local prop = self:expect("IDENT", nil, "Identifier expected after '::'").value
+      if expr.kind ~= "Identifier" then
+        error("Left-hand side of '::' must be a module identifier")
+      end
+      expr = node("PathAccess", { module = expr.name, property = prop })
     else
       break
     end
@@ -745,7 +806,7 @@ local function to_lua_operator(op)
 end
 
 function Emitter.new()
-  return setmetatable({ lines = {}, depth = 0, label_counter = 0, continue_label_stack = {} }, Emitter)
+  return setmetatable({ lines = {}, depth = 0, label_counter = 0, continue_label_stack = {}, _module_stack = {}, _known_modules = {} }, Emitter)
 end
 
 function Emitter:emit(line)
@@ -783,18 +844,38 @@ function Emitter:emit_program(ast)
   self:emit("local function println(...) print(...) end")
   self:emit("local function range(a, b, step)\n  a = a or 1\n  b = b or a\n  if a == b then return { a } end\n  step = step or (a <= b and 1 or -1)\n  local t = {}\n  if step > 0 then\n    for i = a, b, step do t[#t+1] = i end\n  else\n    for i = a, b, step do t[#t+1] = i end\n  end\n  return t\nend")
   if ast.moduleName then
-    self._inside_module = true
     self:emit("local M = {} -- module: " .. ast.moduleName)
+    table.insert(self._module_stack, { var = "M", deferred_reexports = {} })
   else
-    self._inside_module = false
+    -- no module
   end
   for _, stmt in ipairs(ast.body) do
-    self:emit_statement(stmt)
+    -- Ignore bare ModuleDecl in executable files (dependency declaration)
+    if stmt.kind ~= "ModuleDecl" then
+      self:emit_statement(stmt)
+    end
   end
   if ast.moduleName then
+    -- flush any deferred re-exports for root module
+    local cur = self._module_stack[#self._module_stack]
+    if cur then self:flush_deferred_reexports(cur) end
     self:emit("return M")
+    table.remove(self._module_stack)
   end
   return table.concat(self.lines, "\n") .. "\n"
+end
+
+function Emitter:flush_deferred_reexports(cur)
+  for _, entry in ipairs(cur.deferred_reexports or {}) do
+    local base = cur.var
+    for _, p in ipairs(entry.baseParts or {}) do
+      base = base .. "." .. p
+    end
+    for _, name in ipairs(entry.items or {}) do
+      self:emit(string.format("%s.%s = %s.%s", cur.var, name, base, name))
+    end
+  end
+  cur.deferred_reexports = {}
 end
 
 function Emitter:emit_block(block)
@@ -830,8 +911,11 @@ function Emitter:emit_statement_with_ctx(stmt, ctx)
   if k == "Function" then
     local names = {}
     for _, p in ipairs(stmt.params) do table.insert(names, p.name) end
-    if stmt.isPublic and self._inside_module then
-      self:emit(string.format("function M.%s(%s)", stmt.name, table.concat(names, ", ")))
+    local cur = self._module_stack[#self._module_stack]
+    if cur and stmt.isPublic then
+      self:emit(string.format("function %s.%s(%s)", cur.var, stmt.name, table.concat(names, ", ")))
+    elseif cur then
+      self:emit(string.format("local function %s(%s)", stmt.name, table.concat(names, ", ")))
     else
       self:emit(string.format("function %s(%s)", stmt.name, table.concat(names, ", ")))
     end
@@ -984,29 +1068,84 @@ function Emitter:emit_statement_with_ctx(stmt, ctx)
       end
     end
   elseif k == "Use" then
-    local parts = {}
-    for i, p in ipairs(stmt.parts) do
-      if not (i == 1 and (p == "crate" or p == "self")) then
-        table.insert(parts, p)
-      end
+    -- support: use path::to::{a,b}; and pub use
+    local function emit_single(parts, localname)
+      local req = table.concat(parts, ".")
+      self:emit(string.format("local %s = require(%q)", localname, req))
     end
-    local modname = table.concat(parts, ".")
-    local localname = stmt.alias or (parts[#parts] or stmt.parts[#stmt.parts])
-    if localname then
-      self:emit(string.format("local %s = require(%q)", localname, modname))
+    if stmt.items and #stmt.items > 0 then
+      -- group import
+      local cur = self._module_stack[#self._module_stack]
+      local first = stmt.parts[1]
+      if cur and first == "self" and stmt.isPublic then
+        -- defer re-export from self::<path>::{items} until after module body emitted
+        local baseParts = {}
+        for i = 2, #stmt.parts do table.insert(baseParts, stmt.parts[i]) end
+        table.insert(cur.deferred_reexports, { baseParts = baseParts, items = stmt.items })
+      else
+        local prefix = {}
+        for i, p in ipairs(stmt.parts) do
+          if not (i == 1 and (p == "crate" or p == "self")) then
+            table.insert(prefix, p)
+          end
+        end
+        local modname = table.concat(prefix, ".")
+        self:emit(string.format("local __use = require(%q)", modname))
+        for _, item in ipairs(stmt.items) do
+          local name = item
+          self:emit(string.format("local %s = __use.%s", name, name))
+        end
+      end
     else
-      self:emit("-- use (ignored): " .. table.concat(stmt.parts, "::"))
+      local parts = {}
+      for i, p in ipairs(stmt.parts) do
+        if not (i == 1 and (p == "crate" or p == "self")) then
+          table.insert(parts, p)
+        end
+      end
+      local localname = stmt.alias or (parts[#parts] or stmt.parts[#stmt.parts])
+      if localname and #parts > 0 then
+        emit_single(parts, localname)
+      else
+        self:emit("-- use (ignored): " .. table.concat(stmt.parts, "::"))
+      end
     end
   elseif k == "Const" then
     local line = ("%s = %s"):format(stmt.name, self:emit_expression(stmt.value))
-    if stmt.isPublic and self._inside_module then
-      self:emit("M." .. line)
+    local cur = self._module_stack[#self._module_stack]
+    if cur and stmt.isPublic then
+      self:emit(cur.var .. "." .. line)
+    elseif cur then
+      self:emit("local " .. line)
     else
       self:emit("local " .. line)
     end
   elseif k == "ExprStmt" then
     local code = self:emit_expression(stmt.expression)
     self:emit(code)
+  elseif k == "Module" then
+    -- nested module block
+    local parent = self._module_stack[#self._module_stack]
+    local modvar = stmt.name
+    self:emit("local " .. modvar .. " = {}")
+    table.insert(self._module_stack, { var = modvar, deferred_reexports = {} })
+    self._known_modules[modvar] = true
+    -- emit body inside module context
+    -- two-pass: first nested modules, then others
+    local first_pass = {}
+    local second_pass = {}
+    for _, it in ipairs(stmt.body or {}) do
+      if it.kind == "Module" then table.insert(first_pass, it) else table.insert(second_pass, it) end
+    end
+    for _, it in ipairs(first_pass) do self:emit_statement(it) end
+    for _, it in ipairs(second_pass) do self:emit_statement(it) end
+    -- flush deferred re-exports for this module
+    local cur = self._module_stack[#self._module_stack]
+    if cur then self:flush_deferred_reexports(cur) end
+    table.remove(self._module_stack)
+    if parent and stmt.isPublic then
+      self:emit(string.format("%s.%s = %s", parent.var, stmt.name, modvar))
+    end
   else
     error("Unknown statement kind: " .. tostring(k))
   end
@@ -1040,6 +1179,18 @@ function Emitter:emit_expression(expr)
     return self:emit_expression(expr.callee) .. "(" .. table.concat(args, ", ") .. ")"
   elseif k == "Member" then
     return self:emit_expression(expr.object) .. "." .. expr.property
+  elseif k == "PathAccess" then
+    -- Prefer local module variable, otherwise require
+    if expr.module == "self" then
+      local cur = self._module_stack[#self._module_stack]
+      if cur then
+        return string.format("%s.%s", cur.var, expr.property)
+      end
+    end
+    if self._known_modules[expr.module] then
+      return string.format("%s.%s", expr.module, expr.property)
+    end
+    return string.format("require(%q).%s", expr.module, expr.property)
   elseif k == "Index" then
     return self:emit_expression(expr.object) .. "[" .. self:emit_expression(expr.index) .. "]"
   elseif k == "ArrayLiteral" then
@@ -1125,6 +1276,61 @@ local function main()
   local Checker = require("Rulu.lib.checker")
   local Emitter = require("Rulu.lib.emitter")
 
+  local function dirname(path)
+    if not path then return "." end
+    local dir = path:gsub("\\", "/")
+    local idx = dir:match("^.*()/")
+    if idx then
+      return dir:sub(1, idx - 1)
+    else
+      return "."
+    end
+  end
+
+  local function install_rulu_searcher(base_dir)
+    local searchers = package.searchers or package.loaders
+    local function searcher(modname)
+      local rel = (modname or ""):gsub("%.", "/")
+      local candidates = {
+        base_dir .. "/" .. rel .. ".lua",
+        base_dir .. "/" .. rel .. ".rulu",
+        rel .. ".lua",
+        rel .. ".rulu",
+      }
+      for _, p in ipairs(candidates) do
+        local f = io.open(p, "rb")
+        if f then
+          local content = f:read("*a"); f:close()
+          if p:sub(-5) == ".rulu" then
+            local ok_lex, tokens_or_err = pcall(function()
+              local lx = Lexer.new(content)
+              return lx:tokenize()
+            end)
+            if not ok_lex then return nil, tokens_or_err end
+            local ok_par, ast_or_err = pcall(function()
+              local ps = Parser.new(tokens_or_err)
+              return ps:parse_program()
+            end)
+            if not ok_par then return nil, ast_or_err end
+            local ok_chk, chk_err = pcall(function() return Checker.check(ast_or_err) end)
+            if not ok_chk then return nil, chk_err end
+            local em = Emitter.new()
+            local lua_code = em:emit_program(ast_or_err)
+            local loader = (loadstring or load)(lua_code, p)
+            if not loader then return nil, "Failed to load generated Lua from " .. p end
+            return loader, p
+          else
+            local loader = (loadstring or load)(content, p)
+            if not loader then return nil, "Failed to load Lua file " .. p end
+            return loader, p
+          end
+        end
+      end
+      return nil, "rulu searcher: module not found '" .. tostring(modname) .. "'"
+    end
+    table.insert(searchers, 1, searcher)
+  end
+
   if BUNDLED then
     if args.out or args.print or args.run then
       io.stderr:write("In bundled mode, --out/--print/--run are not supported. Just pass an input file.\n")
@@ -1186,11 +1392,12 @@ local function main()
     print("Wrote " .. args.out)
   end
 
-  if not BUNDLED and (args.print or not args.out) then
+  if not BUNDLED and args.print then
     io.write(lua_code)
   end
 
   if (not BUNDLED and args.run) or (BUNDLED and args.input) then
+    install_rulu_searcher(dirname(args.input))
     local loader = loadstring or load
     local chunk, errc = loader(lua_code, args.out or args.input or "rulu_chunk")
     if not chunk then
@@ -1304,6 +1511,14 @@ function Checker.check(ast)
       end
     elseif k == "Use" then
       -- ignore for now
+    elseif k == "Module" then
+      -- check nested items in module block
+      local inner = new_scope(scope)
+      for _, it in ipairs(stmt.body or {}) do
+        visit_stmt(it, inner)
+      end
+    elseif k == "ModuleDecl" then
+       -- executable files may include dependency module declarations; ignore
     elseif k == "Const" then
       declare(scope, stmt.name, { mutable = false, kind = "const" })
     elseif k == "ExprStmt" then

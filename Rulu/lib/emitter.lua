@@ -19,7 +19,7 @@ local function to_lua_operator(op)
 end
 
 function Emitter.new()
-  return setmetatable({ lines = {}, depth = 0, label_counter = 0, continue_label_stack = {} }, Emitter)
+  return setmetatable({ lines = {}, depth = 0, label_counter = 0, continue_label_stack = {}, _module_stack = {}, _known_modules = {} }, Emitter)
 end
 
 function Emitter:emit(line)
@@ -57,18 +57,38 @@ function Emitter:emit_program(ast)
   self:emit("local function println(...) print(...) end")
   self:emit("local function range(a, b, step)\n  a = a or 1\n  b = b or a\n  if a == b then return { a } end\n  step = step or (a <= b and 1 or -1)\n  local t = {}\n  if step > 0 then\n    for i = a, b, step do t[#t+1] = i end\n  else\n    for i = a, b, step do t[#t+1] = i end\n  end\n  return t\nend")
   if ast.moduleName then
-    self._inside_module = true
     self:emit("local M = {} -- module: " .. ast.moduleName)
+    table.insert(self._module_stack, { var = "M", deferred_reexports = {} })
   else
-    self._inside_module = false
+    -- no module
   end
   for _, stmt in ipairs(ast.body) do
-    self:emit_statement(stmt)
+    -- Ignore bare ModuleDecl in executable files (dependency declaration)
+    if stmt.kind ~= "ModuleDecl" then
+      self:emit_statement(stmt)
+    end
   end
   if ast.moduleName then
+    -- flush any deferred re-exports for root module
+    local cur = self._module_stack[#self._module_stack]
+    if cur then self:flush_deferred_reexports(cur) end
     self:emit("return M")
+    table.remove(self._module_stack)
   end
   return table.concat(self.lines, "\n") .. "\n"
+end
+
+function Emitter:flush_deferred_reexports(cur)
+  for _, entry in ipairs(cur.deferred_reexports or {}) do
+    local base = cur.var
+    for _, p in ipairs(entry.baseParts or {}) do
+      base = base .. "." .. p
+    end
+    for _, name in ipairs(entry.items or {}) do
+      self:emit(string.format("%s.%s = %s.%s", cur.var, name, base, name))
+    end
+  end
+  cur.deferred_reexports = {}
 end
 
 function Emitter:emit_block(block)
@@ -104,8 +124,11 @@ function Emitter:emit_statement_with_ctx(stmt, ctx)
   if k == "Function" then
     local names = {}
     for _, p in ipairs(stmt.params) do table.insert(names, p.name) end
-    if stmt.isPublic and self._inside_module then
-      self:emit(string.format("function M.%s(%s)", stmt.name, table.concat(names, ", ")))
+    local cur = self._module_stack[#self._module_stack]
+    if cur and stmt.isPublic then
+      self:emit(string.format("function %s.%s(%s)", cur.var, stmt.name, table.concat(names, ", ")))
+    elseif cur then
+      self:emit(string.format("local function %s(%s)", stmt.name, table.concat(names, ", ")))
     else
       self:emit(string.format("function %s(%s)", stmt.name, table.concat(names, ", ")))
     end
@@ -258,29 +281,84 @@ function Emitter:emit_statement_with_ctx(stmt, ctx)
       end
     end
   elseif k == "Use" then
-    local parts = {}
-    for i, p in ipairs(stmt.parts) do
-      if not (i == 1 and (p == "crate" or p == "self")) then
-        table.insert(parts, p)
-      end
+    -- support: use path::to::{a,b}; and pub use
+    local function emit_single(parts, localname)
+      local req = table.concat(parts, ".")
+      self:emit(string.format("local %s = require(%q)", localname, req))
     end
-    local modname = table.concat(parts, ".")
-    local localname = stmt.alias or (parts[#parts] or stmt.parts[#stmt.parts])
-    if localname then
-      self:emit(string.format("local %s = require(%q)", localname, modname))
+    if stmt.items and #stmt.items > 0 then
+      -- group import
+      local cur = self._module_stack[#self._module_stack]
+      local first = stmt.parts[1]
+      if cur and first == "self" and stmt.isPublic then
+        -- defer re-export from self::<path>::{items} until after module body emitted
+        local baseParts = {}
+        for i = 2, #stmt.parts do table.insert(baseParts, stmt.parts[i]) end
+        table.insert(cur.deferred_reexports, { baseParts = baseParts, items = stmt.items })
+      else
+        local prefix = {}
+        for i, p in ipairs(stmt.parts) do
+          if not (i == 1 and (p == "crate" or p == "self")) then
+            table.insert(prefix, p)
+          end
+        end
+        local modname = table.concat(prefix, ".")
+        self:emit(string.format("local __use = require(%q)", modname))
+        for _, item in ipairs(stmt.items) do
+          local name = item
+          self:emit(string.format("local %s = __use.%s", name, name))
+        end
+      end
     else
-      self:emit("-- use (ignored): " .. table.concat(stmt.parts, "::"))
+      local parts = {}
+      for i, p in ipairs(stmt.parts) do
+        if not (i == 1 and (p == "crate" or p == "self")) then
+          table.insert(parts, p)
+        end
+      end
+      local localname = stmt.alias or (parts[#parts] or stmt.parts[#stmt.parts])
+      if localname and #parts > 0 then
+        emit_single(parts, localname)
+      else
+        self:emit("-- use (ignored): " .. table.concat(stmt.parts, "::"))
+      end
     end
   elseif k == "Const" then
     local line = ("%s = %s"):format(stmt.name, self:emit_expression(stmt.value))
-    if stmt.isPublic and self._inside_module then
-      self:emit("M." .. line)
+    local cur = self._module_stack[#self._module_stack]
+    if cur and stmt.isPublic then
+      self:emit(cur.var .. "." .. line)
+    elseif cur then
+      self:emit("local " .. line)
     else
       self:emit("local " .. line)
     end
   elseif k == "ExprStmt" then
     local code = self:emit_expression(stmt.expression)
     self:emit(code)
+  elseif k == "Module" then
+    -- nested module block
+    local parent = self._module_stack[#self._module_stack]
+    local modvar = stmt.name
+    self:emit("local " .. modvar .. " = {}")
+    table.insert(self._module_stack, { var = modvar, deferred_reexports = {} })
+    self._known_modules[modvar] = true
+    -- emit body inside module context
+    -- two-pass: first nested modules, then others
+    local first_pass = {}
+    local second_pass = {}
+    for _, it in ipairs(stmt.body or {}) do
+      if it.kind == "Module" then table.insert(first_pass, it) else table.insert(second_pass, it) end
+    end
+    for _, it in ipairs(first_pass) do self:emit_statement(it) end
+    for _, it in ipairs(second_pass) do self:emit_statement(it) end
+    -- flush deferred re-exports for this module
+    local cur = self._module_stack[#self._module_stack]
+    if cur then self:flush_deferred_reexports(cur) end
+    table.remove(self._module_stack)
+    if parent and stmt.isPublic then
+      self:emit(string.format("%s.%s = %s", parent.var, stmt.name, modvar))
+    end
   else
     error("Unknown statement kind: " .. tostring(k))
   end
@@ -314,6 +392,18 @@ function Emitter:emit_expression(expr)
     return self:emit_expression(expr.callee) .. "(" .. table.concat(args, ", ") .. ")"
   elseif k == "Member" then
     return self:emit_expression(expr.object) .. "." .. expr.property
+  elseif k == "PathAccess" then
+    -- Prefer local module variable, otherwise require
+    if expr.module == "self" then
+      local cur = self._module_stack[#self._module_stack]
+      if cur then
+        return string.format("%s.%s", cur.var, expr.property)
+      end
+    end
+    if self._known_modules[expr.module] then
+      return string.format("%s.%s", expr.module, expr.property)
+    end
+    return string.format("require(%q).%s", expr.module, expr.property)
   elseif k == "Index" then
     return self:emit_expression(expr.object) .. "[" .. self:emit_expression(expr.index) .. "]"
   elseif k == "ArrayLiteral" then

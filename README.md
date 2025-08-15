@@ -8,6 +8,7 @@ Rulu is a tiny Rust-like language that transpiles to Lua.
 - Small prelude available in all programs: `println(...)` and `range(a, b, step)`.
 - Modules can export constants: `pub const NAME = expr;` becomes `M.NAME` in Lua when inside a module.
 - Ranges: `for i in a..=b {}` for inclusive end; `step` is supported: `for i in 0..10 step 2 {}`.
+- Modules: Added calling module functions from other rulu files
 
 ## Usage
 

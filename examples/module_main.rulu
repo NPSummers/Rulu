@@ -4,14 +4,12 @@
 
 mod Math;
 
-use crate::Math as Math;
-
 fn main() {
   let a = 7;
   let b = 5;
-  let s = Math.add(a, b);
+  let s = Math::add(a, b);
   print(s);
-  print(Math.TEN);
+  print(Math::TEN);
 }
 
 

@@ -84,6 +84,14 @@ function Checker.check(ast)
       end
     elseif k == "Use" then
       -- ignore for now
+    elseif k == "Module" then
+      -- check nested items in module block
+      local inner = new_scope(scope)
+      for _, it in ipairs(stmt.body or {}) do
+        visit_stmt(it, inner)
+      end
+    elseif k == "ModuleDecl" then
+       -- executable files may include dependency module declarations; ignore
     elseif k == "Const" then
       declare(scope, stmt.name, { mutable = false, kind = "const" })
     elseif k == "ExprStmt" then

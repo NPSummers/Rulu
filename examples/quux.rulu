@@ -1,0 +1,16 @@
+mod quux {
+    pub use self::foo::{bar, baz};
+    pub mod foo {
+        pub fn bar() {
+            println("Hi");
+        }
+        pub fn baz() {
+            println("Hi2");
+        }
+    }
+}
+
+fn main() {
+    quux::bar();
+    quux::baz();
+}

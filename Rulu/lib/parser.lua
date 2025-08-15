@@ -59,8 +59,17 @@ function Parser:parse_program()
     local stmt = self:parse_top_level()
     if stmt then table.insert(body, stmt) end
   end
-  -- Allow a leading module decl: mod Name;
-  if body[1] and body[1].kind == "ModuleDecl" then
+  -- Determine if this file is a module or an executable program.
+  -- If there's a top-level `fn main()`, treat as program and keep any `mod` decls as dependency decls.
+  -- Otherwise, if the first statement is a ModuleDecl, treat that as the module name and remove it from body.
+  local hasMain = false
+  for _, s in ipairs(body) do
+    if s.kind == "Function" and s.name == "main" then
+      hasMain = true
+      break
+    end
+  end
+  if not hasMain and body[1] and body[1].kind == "ModuleDecl" then
     moduleName = body[1].name
     table.remove(body, 1)
   end
@@ -68,18 +77,30 @@ function Parser:parse_program()
 end
 
 function Parser:parse_top_level()
-  if self:is("KW", "mod") then
-    return self:parse_module_decl()
+  if self:is("KW", "pub") then
+    -- Handle pub before fn/const/static/mod/use
+    self:match("KW", "pub")
+    if self:is("KW", "fn") then
+      local fn = self:parse_function()
+      fn.isPublic = true
+      return fn
+    elseif self:is("KW", "const") or self:is("KW", "static") then
+      local c = self:parse_const_like()
+      c.isPublic = true
+      return c
+    elseif self:is("KW", "mod") then
+      return self:parse_module(true)
+    elseif self:is("KW", "use") then
+      return self:parse_use(true)
+    else
+      error("Unexpected token after 'pub'")
+    end
+  elseif self:is("KW", "mod") then
+    return self:parse_module(false)
   elseif self:is("KW", "use") then
-    return self:parse_use()
+    return self:parse_use(false)
   elseif self:is("KW", "const") or self:is("KW", "static") then
     return self:parse_const_like()
-  elseif self:is("KW", "pub") then
-    if self:peek(1) and self:peek(1).type == "KW" and self:peek(1).value == "fn" then
-      return self:parse_function()
-    elseif self:peek(1) and self:peek(1).type == "KW" and (self:peek(1).value == "const" or self:peek(1).value == "static") then
-      return self:parse_const_like()
-    end
   elseif self:is("KW", "fn") then
     return self:parse_function()
   elseif self:is("KW", "let") then
@@ -98,6 +119,23 @@ function Parser:parse_module_decl()
   local name = self:expect("IDENT", nil, "Module name expected").value
   self:expect("SEMI", nil, "';' expected after module decl")
   return node("ModuleDecl", { name = name })
+end
+
+function Parser:parse_module(is_public)
+  self:expect("KW", "mod")
+  local name_tok = self:expect("IDENT", nil, "Module name expected")
+  if self:is("SEMI") then
+    self:match("SEMI")
+    return node("ModuleDecl", { name = name_tok.value, isPublic = is_public or false })
+  end
+  self:expect("LBRACE")
+  local items = {}
+  while not self:is("RBRACE") do
+    local item = self:parse_top_level()
+    if item then table.insert(items, item) end
+  end
+  self:expect("RBRACE")
+  return node("Module", { name = name_tok.value, isPublic = is_public or false, body = items })
 end
 
 function Parser:parse_function()
@@ -289,7 +327,7 @@ function Parser:parse_loop()
   return node("Loop", { body = body })
 end
 
-function Parser:parse_use()
+function Parser:parse_use(is_public)
   -- use path::to::name as alias;
   self:expect("KW", "use")
   local parts = {}
@@ -303,18 +341,33 @@ function Parser:parse_use()
   local first = accept_part()
   if not first then error("Expected path after 'use'") end
   table.insert(parts, first)
+  local items = nil
   while self:is("OP", "::") do
     self.pos = self.pos + 1
-    local p = accept_part()
-    if not p then error("Expected identifier after '::'") end
-    table.insert(parts, p)
+    if self:is("LBRACE") then
+      -- group import: ::{a, b}
+      self:expect("LBRACE")
+      items = {}
+      if not self:is("RBRACE") then
+        repeat
+          local name = self:expect("IDENT", nil, "Name in grouped use expected").value
+          table.insert(items, name)
+        until not self:match("COMMA")
+      end
+      self:expect("RBRACE")
+      break
+    else
+      local p = accept_part()
+      if not p then error("Expected identifier after '::'") end
+      table.insert(parts, p)
+    end
   end
   local alias = nil
   if self:match("KW", "as") then
     alias = self:expect("IDENT", nil, "Alias name expected").value
   end
   self:expect("SEMI", nil, "';' expected after use statement")
-  return node("Use", { parts = parts, alias = alias })
+  return node("Use", { parts = parts, alias = alias, items = items, isPublic = is_public or false })
 end
 
 function Parser:parse_const_like()
@@ -402,6 +455,14 @@ function Parser:parse_call()
       self:expect("OP", ".")
       local prop = self:expect("IDENT", nil, "Property name expected").value
       expr = node("Member", { object = expr, property = prop })
+    elseif self:is("OP", "::") then
+      -- Module path access: Mod::name -> PathAccess(Mod, name)
+      self:expect("OP", "::")
+      local prop = self:expect("IDENT", nil, "Identifier expected after '::'").value
+      if expr.kind ~= "Identifier" then
+        error("Left-hand side of '::' must be a module identifier")
+      end
+      expr = node("PathAccess", { module = expr.name, property = prop })
     else
       break
     end
