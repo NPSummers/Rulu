@@ -27,6 +27,12 @@ jobs:
           curl -L -o installer\app\rulu.exe https://github.com/NPSummers/Rulu/releases/download/ver-0.1.0-patch-1/rulu.exe
         shell: cmd
 
+      # Download the Rulu IDE installer from GitHub Releases
+      - name: Download Rulu IDE
+        run: |
+          curl -L -o installer\app\Rulu.IDE.1.0.0.exe https://github.com/NPSummers/RuluIDE/releases/download/IDE-1.0.0/Rulu.IDE.1.0.0.exe
+        shell: cmd
+
       # Install NSIS
       - name: Install NSIS
         run: |

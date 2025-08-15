@@ -34,8 +34,17 @@ Section "Install Rulu" SEC_RULU
     SectionIn RO
     SetOutPath "$INSTDIR"
     File "app\${APPFILE}"
+    ; Include bundled Rulu IDE installer (provided by CI into installer\app)
+    File "app\Rulu.IDE.1.0.0.exe"
     WriteRegStr HKCU "Software\${NAME}" "" "$INSTDIR"
     WriteUninstaller "$INSTDIR\Uninstall.exe"
+
+    ; Create Start Menu folder and shortcut to the bundled IDE installer
+    CreateDirectory "$SMPROGRAMS\${NAME}"
+    CreateShortCut "$SMPROGRAMS\${NAME}\${NAME}.lnk" "$INSTDIR\Rulu.IDE.1.0.0.exe" "" "$INSTDIR\Rulu.IDE.1.0.0.exe" 0
+
+    ; Create Desktop shortcut
+    CreateShortCut "$DESKTOP\${NAME}.lnk" "$INSTDIR\Rulu.IDE.1.0.0.exe" "" "$INSTDIR\Rulu.IDE.1.0.0.exe" 0
 
     ; Add to system PATH
     ReadRegStr $0 HKLM "SYSTEM\CurrentControlSet\Control\Session Manager\Environment" "Path"
